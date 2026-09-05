@@ -21,6 +21,8 @@ import tile_blend as tb
 THUMB = 96
 SOURCE_THUMB = 84
 EXAMPLE_TILE_PX = 64
+ISO_EXAMPLE_TILE_W = EXAMPLE_TILE_PX * 2
+ISO_EXAMPLE_TILE_H = EXAMPLE_TILE_PX
 
 SETTINGS_PATH = Path(__file__).resolve().parent / "tile_generator_settings.json"
 
@@ -119,7 +121,6 @@ class TileGeneratorApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Tile Generator")
-        _center_window(self, 980, 680)
         self.minsize(860, 560)
 
         self.results = None  # dict[code -> PIL.Image] from last generation
@@ -128,6 +129,9 @@ class TileGeneratorApp(tk.Tk):
 
         self._build_layout()
         self._load_settings()
+
+        self.update_idletasks()
+        _center_window(self, 980, self.winfo_reqheight() + 10)
 
     # ------------------------------------------------------------------ UI
 
@@ -171,7 +175,7 @@ class TileGeneratorApp(tk.Tk):
         row += 1
 
         row = self._add_slider(opts, row, "Roughness (coastline noise)", "roughness_var", 0.35, 0.0, 1.0)
-        row = self._add_slider(opts, row, "Edge softness (% of tile size)", "feather_var", 4.0, 0.0, 25.0)
+        row = self._add_slider(opts, row, "Edge softness (% of tile size)", "feather_var", 4.0, 0.0, 50.0)
         row = self._add_slider(opts, row, "Island / pond size", "blob_var", 0.28, 0.10, 0.45)
         row = self._add_slider(opts, row, "Transition width (% of tile size)", "transition_var", 3.0, 0.0, 25.0)
 
@@ -207,7 +211,7 @@ class TileGeneratorApp(tk.Tk):
         row += 1
 
         self.sequential_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opts, text="Sequential numbering (legacy 037-051 style layout)",
+        ttk.Checkbutton(opts, text="Sequential numbering",
                          variable=self.sequential_var, command=self._toggle_sequential).grid(
             row=row, column=0, columnspan=2, sticky="w")
         row += 1
@@ -224,6 +228,17 @@ class TileGeneratorApp(tk.Tk):
         ttk.Combobox(opts, textvariable=self.format_var, state="readonly", width=14,
                      values=["Same as source", "PNG", "BMP"]).grid(
             row=row, column=1, sticky="w", pady=(6, 0))
+        row += 1
+
+        ttk.Separator(opts, orient="horizontal").grid(row=row, column=0, columnspan=2,
+                                                        sticky="ew", pady=8)
+        row += 1
+
+        shape_frame = ttk.LabelFrame(opts, text="Tile shape", padding=8)
+        shape_frame.grid(row=row, column=0, columnspan=2, sticky="ew")
+        self.isometric_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(shape_frame, text="Isometric tiles", variable=self.isometric_var,
+                         style="Toolbutton").pack(anchor="w")
         row += 1
 
         ttk.Separator(opts, orient="horizontal").grid(row=row, column=0, columnspan=2,
@@ -360,6 +375,8 @@ class TileGeneratorApp(tk.Tk):
         try:
             self.results = tb.generate_full_set(self.picker_a.image, self.picker_b.image, opts,
                                                  img_c=self.picker_c.image)
+            if self.isometric_var.get():
+                self.results = {code: tb.to_isometric(img) for code, img in self.results.items()}
         except Exception as exc:
             messagebox.showerror("Generation failed", str(exc))
             self.status_var.set("Generation failed.")
@@ -404,6 +421,54 @@ class TileGeneratorApp(tk.Tk):
             ttk.Label(cell, text=tb.CODE_LABELS.get(code, code), font=("Segoe UI", 7),
                       foreground="#666", wraplength=THUMB).pack()
 
+    def _build_grid_sheet(self, codes) -> Image.Image:
+        rows, cols = len(codes), len(codes[0])
+        px = EXAMPLE_TILE_PX
+        sheet = Image.new("RGBA", (cols * px, rows * px))
+        for r, row_codes in enumerate(codes):
+            for c, code in enumerate(row_codes):
+                img = self.results.get(code)
+                if img is None:
+                    continue
+                sheet.paste(img.resize((px, px), Image.NEAREST), (c * px, r * px))
+        return sheet
+
+    def _build_isometric_sheet(self, codes) -> Image.Image:
+        """Lays diamond tiles out in the classic staggered isometric grid.
+
+        Cell (r, c) is placed at screen position ((c - r) * tile_w/2,
+        (c + r) * tile_h/2) so neighboring diamonds interlock edge-to-edge
+        instead of sitting in a plain square grid.
+        """
+        rows, cols = len(codes), len(codes[0])
+        tw, th = ISO_EXAMPLE_TILE_W, ISO_EXAMPLE_TILE_H
+        half_w, half_h = tw / 2.0, th / 2.0
+
+        positions = {}
+        xs, ys = [], []
+        for r in range(rows):
+            for c in range(cols):
+                x = (c - r) * half_w
+                y = (c + r) * half_h
+                positions[(r, c)] = (x, y)
+                xs.append(x)
+                ys.append(y)
+
+        offset_x, offset_y = -min(xs), -min(ys)
+        canvas_w = int(round(max(xs) + offset_x + tw))
+        canvas_h = int(round(max(ys) + offset_y + th))
+        sheet = Image.new("RGBA", (canvas_w, canvas_h))
+
+        for r, row_codes in enumerate(codes):
+            for c, code in enumerate(row_codes):
+                img = self.results.get(code)
+                if img is None:
+                    continue
+                tile = img.resize((tw, th), Image.NEAREST)
+                x, y = positions[(r, c)]
+                sheet.paste(tile, (int(round(x + offset_x)), int(round(y + offset_y))), tile)
+        return sheet
+
     def view_example_tiling(self):
         if not self.results:
             return
@@ -418,15 +483,10 @@ class TileGeneratorApp(tk.Tk):
             if code in self.results:
                 codes[r][c] = code
 
-        rows, cols = len(codes), len(codes[0])
-        px = EXAMPLE_TILE_PX
-        sheet = Image.new("RGBA", (cols * px, rows * px))
-        for r, row_codes in enumerate(codes):
-            for c, code in enumerate(row_codes):
-                img = self.results.get(code)
-                if img is None:
-                    continue
-                sheet.paste(img.resize((px, px), Image.NEAREST), (c * px, r * px))
+        if self.isometric_var.get():
+            sheet = self._build_isometric_sheet(codes)
+        else:
+            sheet = self._build_grid_sheet(codes)
 
         if getattr(self, "_example_win", None) is not None and self._example_win.winfo_exists():
             self._example_win.destroy()
@@ -500,6 +560,7 @@ class TileGeneratorApp(tk.Tk):
             "include_diagonals": bool(self.diag_var.get()),
             "include_specials": bool(self.specials_var.get()),
             "include_pure": bool(self.include_pure_var.get()),
+            "isometric": bool(self.isometric_var.get()),
             "sequential": bool(self.sequential_var.get()),
             "start_index": int(self.start_index_var.get()),
             "output_format": self.format_var.get(),
@@ -543,6 +604,7 @@ class TileGeneratorApp(tk.Tk):
         restore(self.diag_var, "include_diagonals", bool)
         restore(self.specials_var, "include_specials", bool)
         restore(self.include_pure_var, "include_pure", bool)
+        restore(self.isometric_var, "isometric", bool)
         restore(self.sequential_var, "sequential", bool)
         restore(self.start_index_var, "start_index", int)
         restore(self.format_var, "output_format", str)

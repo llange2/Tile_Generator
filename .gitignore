@@ -3,3 +3,4 @@ __pycache__/
 /output/
 /test_result/
 tile_generator_settings.json
+.claude/
