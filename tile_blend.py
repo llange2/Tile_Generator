@@ -131,32 +131,34 @@ def _falloff(x: np.ndarray, inner: float, outer: float) -> np.ndarray:
     return 1.0 - t * t * (3 - 2 * t)
 
 
-def _keep_largest_component(binary: np.ndarray) -> np.ndarray:
-    """Removes every connected component of `binary` except the largest one."""
+def _keep_largest_components(binary: np.ndarray, count: int = 1) -> np.ndarray:
+    """Removes every connected component of `binary` except the `count` largest."""
     labeled, n = ndimage.label(binary)
-    if n <= 1:
+    if n <= count:
         return binary
     sizes = ndimage.sum(binary, labeled, index=range(1, n + 1))
-    keep = int(np.argmax(sizes)) + 1
-    return labeled == keep
+    keep = np.argsort(sizes)[::-1][:count] + 1
+    return np.isin(labeled, keep)
 
 
-def _clean_disconnected_specks(binary: np.ndarray) -> np.ndarray:
-    """Collapses a noisy binary split into a single A region and single B region.
+def _clean_disconnected_specks(binary: np.ndarray, expected_components: int = 1) -> np.ndarray:
+    """Collapses a noisy binary split into `expected_components` region(s) per side.
 
-    The underlying gradient is a single smooth saddle, so there should only
-    ever be one coherent region per side; anything else is a noise artifact
-    (a fleck of B floating inside A, or vice versa) and gets reassigned to
-    its surrounding majority.
+    The underlying gradient is a single smooth saddle (or, for the diagonal
+    combos, a saddle with two opposite-corner regions per side), so there
+    should only ever be that many coherent regions per side; anything beyond
+    that is a noise artifact (a fleck of B floating inside A, or vice versa)
+    and gets reassigned to its surrounding majority.
     """
-    binary = _keep_largest_component(binary)          # drop stray B flecks
-    binary = ~_keep_largest_component(~binary)         # drop stray A flecks (holes in B)
+    binary = _keep_largest_components(binary, expected_components)          # drop stray B flecks
+    binary = ~_keep_largest_components(~binary, expected_components)        # drop stray A flecks (holes in B)
     return binary
 
 
 def build_corner_mask(size: int, tl: int, tr: int, bl: int, br: int,
                        noise_strength: float, edge_margin_frac: float,
-                       feather_width: float, seed: int) -> np.ndarray:
+                       feather_width: float, seed: int,
+                       expected_components: int = 1) -> np.ndarray:
     g = _corner_gradient(size, tl, tr, bl, br)
     n = _value_noise(size, seed, blur_radius=max(1.0, size * 0.12))
     edge_w = _edge_fade_window(size, edge_margin_frac)
@@ -187,7 +189,7 @@ def build_corner_mask(size: int, tl: int, tr: int, bl: int, br: int,
     # (typically handful of) pixels that reassignment actually touched --
     # everywhere else keeps its finely feathered value from above.
     raw_binary = perturbed >= 0.5
-    cleaned_binary = _clean_disconnected_specks(raw_binary)
+    cleaned_binary = _clean_disconnected_specks(raw_binary, expected_components)
     flipped = cleaned_binary != raw_binary
     if np.any(flipped):
         soft_mask = np.where(flipped, cleaned_binary.astype(soft_mask.dtype), soft_mask)
@@ -288,8 +290,10 @@ def generate_full_set(img_a: Image.Image, img_b: Image.Image, opts: BlendOptions
     for code, bits, _cat in combos:
         tl, tr, bl, br = bits
         seed = derive_seed(opts.seed, code)
+        expected_components = 2 if _cat == "diagonal" else 1
         mask = build_corner_mask(size, tl, tr, bl, br, opts.noise_strength,
-                                  opts.edge_margin_frac, feather_width, seed)
+                                  opts.edge_margin_frac, feather_width, seed,
+                                  expected_components)
         results[code] = blend(mask)
 
     if opts.include_specials:
