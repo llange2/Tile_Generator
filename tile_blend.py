@@ -324,7 +324,10 @@ def to_isometric(img: Image.Image) -> Image.Image:
     img = img.convert("RGBA")
     rotated = img.rotate(45, expand=True, resample=Image.BICUBIC)
     w, h = rotated.size
-    return rotated.resize((w, max(1, round(h / 2))), Image.LANCZOS)
+    # BICUBIC (not LANCZOS) for the squash: Lanczos's negative-lobe ringing
+    # on the hard alpha edge left by rotate() speckles the diamond's edges
+    # with stray semi-transparent pixels ("ripped" corners).
+    return rotated.resize((w, max(1, round(h / 2))), Image.BICUBIC)
 
 
 EXAMPLE_LAYOUT_ROWS = 10
