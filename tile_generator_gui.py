@@ -171,7 +171,7 @@ class TileGeneratorApp(tk.Tk):
         row += 1
 
         row = self._add_slider(opts, row, "Roughness (coastline noise)", "roughness_var", 0.35, 0.0, 1.0)
-        row = self._add_slider(opts, row, "Edge softness (% of tile size)", "feather_var", 4.0, 0.0, 25.0)
+        row = self._add_slider(opts, row, "Edge softness (% of tile size)", "feather_var", 4.0, 0.0, 100.0)
         row = self._add_slider(opts, row, "Island / pond size", "blob_var", 0.28, 0.10, 0.45)
         row = self._add_slider(opts, row, "Transition width (% of tile size)", "transition_var", 3.0, 0.0, 25.0)
 
