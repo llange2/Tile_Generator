@@ -317,12 +317,20 @@ def generate_full_set(img_a: Image.Image, img_b: Image.Image, opts: BlendOptions
 def to_isometric(img: Image.Image) -> Image.Image:
     """Converts a square top-down tile into a diamond-shaped isometric tile.
 
-    Rotates the square 45 degrees then squashes it vertically by half,
+    Rotates the square -45 degrees then squashes it vertically by half,
     producing the classic 2:1 isometric diamond silhouette with
     transparent padding filling the corners of the canvas.
+
+    The rotation direction matters: it must send the square's top/right/
+    bottom/left edges to the diamond's NE/SE/SW/NW edges respectively, so
+    each edge ends up touching the same neighbor it touched on the square
+    grid (see _build_isometric_sheet's (c, r) -> screen position formula,
+    where +c moves SE and +r moves SW). Rotating +45 instead sends them to
+    NW/NE/SE/SW -- one position off -- which misaligns every transition
+    tile's boundary with its isometric neighbor, breaking the fit.
     """
     img = img.convert("RGBA")
-    rotated = img.rotate(45, expand=True, resample=Image.BICUBIC)
+    rotated = img.rotate(-45, expand=True, resample=Image.BICUBIC)
     w, h = rotated.size
     return rotated.resize((w, max(1, round(h / 2))), Image.LANCZOS)
 
