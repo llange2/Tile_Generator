@@ -25,6 +25,7 @@ ISO_EXAMPLE_TILE_W = EXAMPLE_TILE_PX * 2
 ISO_EXAMPLE_TILE_H = EXAMPLE_TILE_PX
 
 SETTINGS_PATH = Path(__file__).resolve().parent / "tile_generator_settings.json"
+ATLAS_FILENAME = "tileset.json"
 
 IMAGE_FILETYPES = [
     ("Image files", "*.bmp *.png *.gif *.jpg *.jpeg *.tga"),
@@ -176,7 +177,7 @@ class TileGeneratorApp(tk.Tk):
 
         row = self._add_slider(opts, row, "Roughness (coastline noise)", "roughness_var", 0.35, 0.0, 1.0)
         row = self._add_slider(opts, row, "Edge softness (% of tile size)", "feather_var", 4.0, 0.0, 50.0)
-        row = self._add_slider(opts, row, "Island / pond size", "blob_var", 0.28, 0.10, 0.45)
+        row = self._add_slider(opts, row, "Island / pond size", "blob_var", 0.28, *tb.BLOB_SIZE_RANGE)
         row = self._add_slider(opts, row, "Transition width (% of tile size)", "transition_var", 3.0, 0.0, 25.0)
 
         ttk.Label(opts, text="Seed").grid(row=row, column=0, sticky="w", pady=(6, 0))
@@ -188,16 +189,28 @@ class TileGeneratorApp(tk.Tk):
             side="left", padx=(4, 0))
         row += 1
 
+        self.basic_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(opts, text="Include basic tiles",
+                         variable=self.basic_var).grid(row=row, column=0, columnspan=2,
+                                                        sticky="w", pady=(8, 0))
+        row += 1
+
         self.diag_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(opts, text="Include diagonal (checkerboard) combinations",
                          variable=self.diag_var).grid(row=row, column=0, columnspan=2,
-                                                       sticky="w", pady=(8, 0))
+                                                       sticky="w")
         row += 1
 
         self.specials_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(opts, text="Include island / pond tiles",
                          variable=self.specials_var).grid(row=row, column=0, columnspan=2,
                                                            sticky="w")
+        row += 1
+
+        self.border_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(opts, text="Include seamless border tile",
+                         variable=self.border_var).grid(row=row, column=0, columnspan=2,
+                                                         sticky="w")
         row += 1
 
         self.include_pure_var = tk.BooleanVar(value=True)
@@ -317,8 +330,10 @@ class TileGeneratorApp(tk.Tk):
             noise_strength=float(self.roughness_var.get()),
             feather_px=float(self.feather_var.get()) / 100.0 * size,
             edge_margin_frac=0.18,
+            include_basic=bool(self.basic_var.get()),
             include_diagonals=bool(self.diag_var.get()),
             include_specials=bool(self.specials_var.get()),
+            include_border=bool(self.border_var.get()),
             blob_radius_frac=float(self.blob_var.get()),
             blob_feather_frac=0.10,
             seed=int(self.seed_var.get()),
@@ -326,11 +341,13 @@ class TileGeneratorApp(tk.Tk):
         )
 
     def _current_filenames(self, ext: str) -> dict:
-        codes = [c for c, _b, _cat in tb.STANDARD_COMBOS]
+        codes = [c for c, _b, _cat in tb.STANDARD_COMBOS] if self.basic_var.get() else []
         if self.diag_var.get():
             codes += [c for c, _b, _cat in tb.DIAGONAL_COMBOS]
         if self.specials_var.get():
             codes += ["island", "pond"]
+        if self.border_var.get():
+            codes += ["border"]
         use_transition = self.picker_c.image is not None and float(self.transition_var.get()) > 0
         if self.include_pure_var.get():
             codes += ["_pure_a", "_pure_b"]
@@ -345,9 +362,14 @@ class TileGeneratorApp(tk.Tk):
                 for code in ("diag-tlbr", "diag-trbl"):
                     names[code] = f"{next_idx:03d}_{overlay_stem}{ext}"
                     next_idx += 1
+            if not self.basic_var.get():
+                for code, _b, _cat in tb.STANDARD_COMBOS:
+                    names.pop(code, None)
             if not self.specials_var.get():
                 names.pop("island", None)
                 names.pop("pond", None)
+            if self.border_var.get():
+                names.setdefault("border", f"{self.picker_a.stem}_full_1{ext}")
             if not self.include_pure_var.get():
                 names.pop("_pure_a", None)
                 names.pop("_pure_b", None)
@@ -358,7 +380,14 @@ class TileGeneratorApp(tk.Tk):
             return {c: names[c] for c in codes if c in names}
 
         c_stem = self.picker_c.stem if self.picker_c.path else "transition"
-        return tb.descriptive_filenames(self.picker_a.stem, self.picker_b.stem, codes, ext, c_stem=c_stem)
+        names = tb.descriptive_filenames(self.picker_a.stem, self.picker_b.stem, codes, ext, c_stem=c_stem)
+        if self.isometric_var.get():
+            # Overrides whichever codes the isometric edge-naming convention
+            # can represent (edge-*/inner-*/pure tiles); corner-*, diag-*,
+            # island and pond have no clean diamond-edge meaning (see
+            # tile_blend.EDGE_ATTR_MAP) and keep their descriptive names.
+            names.update(tb.isometric_edge_filenames(self.picker_a.stem, self.picker_b.stem, codes, ext))
+        return names
 
     def generate_preview(self):
         if self.picker_a.image is None or self.picker_b.image is None:
@@ -394,11 +423,13 @@ class TileGeneratorApp(tk.Tk):
         self._thumb_refs.clear()
 
         names = self._current_filenames(".png")
-        order = [c for c, _b, _cat in tb.STANDARD_COMBOS]
+        order = [c for c, _b, _cat in tb.STANDARD_COMBOS] if self.basic_var.get() else []
         if self.diag_var.get():
             order += [c for c, _b, _cat in tb.DIAGONAL_COMBOS]
         if self.specials_var.get():
             order += ["island", "pond"]
+        if self.border_var.get():
+            order += ["border"]
         if self.include_pure_var.get():
             order += ["_pure_a", "_pure_b", "_pure_c"]
 
@@ -534,13 +565,48 @@ class TileGeneratorApp(tk.Tk):
             except Exception as exc:
                 errors.append(f"{filename}: {exc}")
 
+        atlas_note = ""
+        if self.isometric_var.get():
+            added = self._update_atlas(folder, names, errors)
+            if added:
+                atlas_note = f"\nAdded {added} new entr{'y' if added == 1 else 'ies'} to {ATLAS_FILENAME}."
+
         if errors:
             messagebox.showwarning("Export finished with errors",
                                     f"Saved {saved} tiles to:\n{folder}\n\nErrors:\n" + "\n".join(errors))
         else:
-            messagebox.showinfo("Export complete", f"Saved {saved} tiles to:\n{folder}")
+            messagebox.showinfo("Export complete", f"Saved {saved} tiles to:\n{folder}{atlas_note}")
         self.status_var.set(f"Exported {saved} tiles to {folder}")
         self._save_settings()
+
+    def _update_atlas(self, folder: str, names: dict, errors: list) -> int:
+        """Merges this export's edge-representable tiles into <folder>/tileset.json,
+        skipping filenames already present so re-exporting never duplicates entries.
+        Returns the number of newly added entries, or 0 if none / on failure."""
+        entries = tb.atlas_entries(self.picker_a.stem, self.picker_b.stem, names)
+        if not entries or not self.results:
+            return 0
+
+        tile_w, tile_h = next(iter(self.results.values())).size
+        atlas_path = os.path.join(folder, ATLAS_FILENAME)
+
+        existing = None
+        if os.path.isfile(atlas_path):
+            try:
+                existing = json.loads(Path(atlas_path).read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                errors.append(f"{ATLAS_FILENAME}: could not read existing file ({exc}); starting fresh")
+
+        before = len(existing.get("tiles", [])) if existing else 0
+        merged = tb.merge_atlas(existing, entries, tile_w, tile_h)
+        added = len(merged["tiles"]) - before
+
+        try:
+            Path(atlas_path).write_text(json.dumps(merged, indent=2), encoding="utf-8")
+        except OSError as exc:
+            errors.append(f"{ATLAS_FILENAME}: {exc}")
+            return 0
+        return added
 
     # ------------------------------------------------------------ settings
 
@@ -557,8 +623,10 @@ class TileGeneratorApp(tk.Tk):
             "blob_size": float(self.blob_var.get()),
             "transition_width_pct": float(self.transition_var.get()),
             "seed": int(self.seed_var.get()),
+            "include_basic": bool(self.basic_var.get()),
             "include_diagonals": bool(self.diag_var.get()),
             "include_specials": bool(self.specials_var.get()),
+            "include_border": bool(self.border_var.get()),
             "include_pure": bool(self.include_pure_var.get()),
             "isometric": bool(self.isometric_var.get()),
             "sequential": bool(self.sequential_var.get()),
@@ -601,8 +669,10 @@ class TileGeneratorApp(tk.Tk):
         restore(self.blob_var, "blob_size", float)
         restore(self.transition_var, "transition_width_pct", float)
         restore(self.seed_var, "seed", int)
+        restore(self.basic_var, "include_basic", bool)
         restore(self.diag_var, "include_diagonals", bool)
         restore(self.specials_var, "include_specials", bool)
+        restore(self.border_var, "include_border", bool)
         restore(self.include_pure_var, "include_pure", bool)
         restore(self.isometric_var, "isometric", bool)
         restore(self.sequential_var, "sequential", bool)

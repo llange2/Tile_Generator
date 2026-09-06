@@ -47,6 +47,10 @@ DIAGONAL_COMBOS = [
     ("diag-trbl", (0, 1, 1, 0), "diagonal"),
 ]
 
+# Valid range of the GUI's "Island / pond size" slider; also drives the
+# seamless-border tile's overlay-square sizing (see border_overlay_fraction).
+BLOB_SIZE_RANGE = (0.10, 0.45)
+
 # Exact slot order reproducing the reference 037-051 water tileset when
 # start_index=37 and the overlay stem is "water" (see sequential_filenames).
 LEGACY_ORDER = [
@@ -66,8 +70,10 @@ class BlendOptions:
     noise_strength: float = 0.35
     feather_px: float = 2.0
     edge_margin_frac: float = 0.18
+    include_basic: bool = True
     include_diagonals: bool = False
     include_specials: bool = True
+    include_border: bool = True
     blob_radius_frac: float = 0.28
     blob_feather_frac: float = 0.10
     seed: int = 0
@@ -223,6 +229,50 @@ def build_blob_mask(size: int, invert: bool, radius_frac: float, feather_frac: f
     return (1.0 - blob) if invert else blob
 
 
+def border_overlay_fraction(size_frac: float) -> float:
+    """Maps the "Island / pond size" slider value to the seamless-border
+    tile's overlay-square width, as a fraction of the full tile size.
+
+    Minimum slider position -> 20% overlay (40% base border kept on each
+    side); maximum slider position -> 80% overlay (10% base border kept on
+    each side); linear in between.
+    """
+    lo, hi = BLOB_SIZE_RANGE
+    s = min(max(size_frac, lo), hi)
+    t = (s - lo) / (hi - lo)
+    return 0.20 + t * (0.80 - 0.20)
+
+
+def border_feather_cap(overlay_frac: float) -> float:
+    """Maximum usable "edge softness" (total smoothstep band width, as a
+    fraction of tile size) for the seamless-border tile at a given overlay
+    fraction -- the smoothing band straddles the base/overlay boundary and
+    can't reach past whichever of the two regions (base border or overlay
+    square) is smaller, on either side."""
+    edge_frac = (1.0 - overlay_frac) / 2.0
+    return 2.0 * min(edge_frac, overlay_frac)
+
+
+def build_border_mask(size: int, overlay_frac: float, feather_frac: float) -> np.ndarray:
+    """Square "seamless border" mask: overlay (B) fills a centered square of
+    width `overlay_frac` * size, base (A) forms a uniform border around it.
+
+    Unlike build_blob_mask, no noise is applied -- the border must stay
+    perfectly regular so the tile's edges exactly match its neighbors and
+    the tiling stays seamless.
+    """
+    cx = cy = (size - 1) / 2.0
+    ys, xs = np.mgrid[0:size, 0:size].astype(np.float32)
+    dist = np.maximum(np.abs(xs - cx), np.abs(ys - cy))  # Chebyshev distance -> concentric squares
+
+    half = size * 0.5
+    radius = overlay_frac * half
+    feather = max(feather_frac * half, 0.5)
+
+    t = np.clip((dist - (radius - feather)) / (2 * feather), 0.0, 1.0)
+    return 1.0 - (t * t * (3 - 2 * t))  # 1 inside (overlay/B), 0 outside (base/A)
+
+
 def composite(img_a: Image.Image, img_b: Image.Image, mask: np.ndarray) -> Image.Image:
     a = np.asarray(img_a, dtype=np.float32)
     b = np.asarray(img_b, dtype=np.float32)
@@ -282,7 +332,7 @@ def generate_full_set(img_a: Image.Image, img_b: Image.Image, opts: BlendOptions
 
     feather_width = max(opts.feather_px, 0.5) / size
 
-    combos = list(STANDARD_COMBOS)
+    combos = list(STANDARD_COMBOS) if opts.include_basic else []
     if opts.include_diagonals:
         combos = combos + DIAGONAL_COMBOS
 
@@ -306,6 +356,13 @@ def generate_full_set(img_a: Image.Image, img_b: Image.Image, opts: BlendOptions
         mask_pond = build_blob_mask(size, False, opts.blob_radius_frac,
                                      opts.blob_feather_frac, opts.noise_strength, seed_pond)
         results["pond"] = blend(mask_pond)
+
+    if opts.include_border:
+        overlay_frac = border_overlay_fraction(opts.blob_radius_frac)
+        feather_cap = border_feather_cap(overlay_frac)
+        feather_frac = min(max(opts.feather_px / size, 0.0), feather_cap)
+        mask_border = build_border_mask(size, overlay_frac, feather_frac)
+        results["border"] = blend(mask_border)
 
     results["_pure_a"] = a
     results["_pure_b"] = b
@@ -406,6 +463,7 @@ CODE_LABELS = {
     "diag-trbl": "Diagonal: TR+BL are B",
     "island": "Island: lone A tile in B",
     "pond": "Pond: lone B tile in A",
+    "border": "Seamless border: square B inset, A frame stays edge-tileable",
     "_pure_a": "Pure A (base terrain)",
     "_pure_b": "Pure B (overlay terrain)",
     "_pure_c": "Pure C (transition terrain)",
@@ -441,6 +499,132 @@ def descriptive_filenames(a_stem: str, b_stem: str, codes: list, ext: str,
             names[code] = f"{b_stem}_full{ext}"
         elif code == "_pure_c":
             names[code] = f"{c_stem}_full{ext}"
+        elif code == "border":
+            # Still mostly base terrain (only the center square carries the
+            # overlay), so it's named after the base tile, like "_pure_a",
+            # rather than the "<a>_<b>_<code>" pattern used for blends.
+            names[code] = f"{a_stem}_full_1{ext}"
         else:
             names[code] = f"{a_stem}_{b_stem}_{code}{ext}"
     return names
+
+
+# --- Isometric edge naming & atlas convention -----------------------------
+#
+# Project convention: an isometric diamond tile has 4 edges -- ne/se/sw/nw
+# (see naming-convention doc) -- each independently carrying either the
+# base or a secondary terrain, giving 16 combinations per terrain pair.
+#
+# to_isometric() rotates the square 45 degrees then squashes it vertically.
+# That rotation sends each ORIGINAL SQUARE CORNER to one diamond TIP
+# (tl->W, tr->N, br->E, bl->S) and each original square SIDE to one diamond
+# EDGE connecting the two tips its endpoints became:
+#   top side (tl-tr)    -> W-N edge -> "nw" (upper-left, borders W neighbor)
+#   right side (tr-br)  -> N-E edge -> "ne" (upper-right, borders N neighbor)
+#   bottom side (bl-br) -> E-S edge -> "se" (lower-right, borders E neighbor)
+#   left side (tl-bl)   -> S-W edge -> "sw" (lower-left, borders S neighbor)
+# (empirically verified against to_isometric's actual rotation direction).
+#
+# STANDARD_COMBOS' edge-top/right/bottom/left codes are exactly the tiles
+# where one such side is uniformly secondary (both its corners = 1), so
+# they map onto a single diamond edge. The inner-* codes (three corners
+# secondary) are exactly the tiles where two ADJACENT sides are uniformly
+# secondary, mapping onto a chained pair of diamond edges.
+#
+# corner-*, diag-* and the island/pond specials have no side where BOTH
+# corners agree -- only a single-tip / diagonal-neighbor touch -- so under
+# this 4-edge scheme they're indistinguishable from a plain base tile (see
+# the naming-convention doc's "known limitation"). They're intentionally
+# left out of the edge/atlas naming below and keep their old descriptive
+# names.
+EDGE_ORDER = ("ne", "se", "sw", "nw")
+
+EDGE_ATTR_MAP = {
+    "edge-top": ("nw",),
+    "edge-right": ("ne",),
+    "edge-bottom": ("se",),
+    "edge-left": ("sw",),
+    "inner-tl": ("ne", "se"),
+    "inner-tr": ("se", "sw"),
+    "inner-bl": ("ne", "nw"),
+    "inner-br": ("sw", "nw"),
+}
+
+
+def edge_chain_suffix(code: str):
+    """Returns e.g. 'ne', 'ne-se' (NE->SE->SW->NW order) for a code with a
+    clean isometric-edge meaning, or None if the convention can't represent it."""
+    edges = EDGE_ATTR_MAP.get(code)
+    if edges is None:
+        return None
+    return "-".join(e for e in EDGE_ORDER if e in edges)
+
+
+def edge_signature(code: str, base_stem: str, secondary_stem: str):
+    """Per-edge terrain dict (the naming convention's tile-data 'edges'
+    field) for `code`, or None if the convention can't represent it."""
+    if code == "_pure_a":
+        return {e: base_stem for e in EDGE_ORDER}
+    if code == "_pure_b":
+        return {e: secondary_stem for e in EDGE_ORDER}
+    edges = EDGE_ATTR_MAP.get(code)
+    if edges is None:
+        return None
+    return {e: (secondary_stem if e in edges else base_stem) for e in EDGE_ORDER}
+
+
+def isometric_edge_filenames(base_stem: str, secondary_stem: str, codes: list, ext: str) -> dict:
+    """Filenames per <base>_<secondary>_edge-<pos>.<ext>, for every code
+    edge_chain_suffix() can resolve (plus '_full' names for the pure tiles).
+    Codes without a clean edge meaning (corners/diagonals/island/pond) are
+    simply omitted -- callers should fall back to descriptive_filenames()
+    for those.
+    """
+    names = {}
+    for code in codes:
+        if code == "_pure_a":
+            names[code] = f"{base_stem}_full{ext}"
+        elif code == "_pure_b":
+            names[code] = f"{secondary_stem}_full{ext}"
+        else:
+            suffix = edge_chain_suffix(code)
+            if suffix:
+                names[code] = f"{base_stem}_{secondary_stem}_edge-{suffix}{ext}"
+    return names
+
+
+def atlas_entries(base_stem: str, secondary_stem: str, names: dict) -> list:
+    """Builds atlas 'tiles' entries (file/base/edges, sans id/position) for
+    every code in `names` whose edge_signature() is representable."""
+    entries = []
+    for code, filename in names.items():
+        edges = edge_signature(code, base_stem, secondary_stem)
+        if edges is None:
+            continue
+        # "base" is the dominant terrain of THIS tile, not necessarily the
+        # pair's base_stem -- a pure-secondary tile is entirely secondary_stem.
+        tile_base = secondary_stem if code == "_pure_b" else base_stem
+        entries.append({"file": filename, "base": tile_base, "edges": edges})
+    return entries
+
+
+def merge_atlas(existing, new_entries: list, tile_width: int, tile_height: int, cols: int = 8) -> dict:
+    """Merges new_entries into an existing atlas dict (or a fresh one if
+    `existing` is None), skipping any file already present so re-exporting
+    into the same output directory never creates duplicate entries.
+    Reassigns id/atlas_x/atlas_y for the full set in list order, so
+    existing entries keep their id and new ones are appended after them.
+    """
+    tiles = list(existing.get("tiles", [])) if existing else []
+    known_files = {t.get("file") for t in tiles}
+    for entry in new_entries:
+        if entry["file"] not in known_files:
+            tiles.append(dict(entry))
+            known_files.add(entry["file"])
+
+    for idx, tile in enumerate(tiles):
+        tile["id"] = idx
+        tile["atlas_x"] = (idx % cols) * tile_width
+        tile["atlas_y"] = (idx // cols) * tile_height
+
+    return {"tile_width": tile_width, "tile_height": tile_height, "tiles": tiles}
