@@ -340,7 +340,16 @@ class TileGeneratorApp(tk.Tk):
             transition_width_px=float(self.transition_var.get()) / 100.0 * size,
         )
 
-    def _current_filenames(self, ext: str) -> dict:
+    def _border_filename(self, ext: str, folder: str | None) -> str:
+        """Picks the border tile's filename, avoiding collisions with a
+        border tile already exported (under a different overlay) into
+        `folder`. Without a folder (e.g. the preview grid, before an output
+        location is chosen) falls back to the plain '_1' placeholder."""
+        if folder and os.path.isdir(folder):
+            return tb.next_border_filename(self.picker_a.stem, ext, os.listdir(folder))
+        return f"{self.picker_a.stem}_full_1{ext}"
+
+    def _current_filenames(self, ext: str, folder: str | None = None) -> dict:
         codes = [c for c, _b, _cat in tb.STANDARD_COMBOS] if self.basic_var.get() else []
         if self.diag_var.get():
             codes += [c for c, _b, _cat in tb.DIAGONAL_COMBOS]
@@ -369,7 +378,7 @@ class TileGeneratorApp(tk.Tk):
                 names.pop("island", None)
                 names.pop("pond", None)
             if self.border_var.get():
-                names.setdefault("border", f"{self.picker_a.stem}_full_1{ext}")
+                names.setdefault("border", self._border_filename(ext, folder))
             if not self.include_pure_var.get():
                 names.pop("_pure_a", None)
                 names.pop("_pure_b", None)
@@ -381,6 +390,8 @@ class TileGeneratorApp(tk.Tk):
 
         c_stem = self.picker_c.stem if self.picker_c.path else "transition"
         names = tb.descriptive_filenames(self.picker_a.stem, self.picker_b.stem, codes, ext, c_stem=c_stem)
+        if "border" in names:
+            names["border"] = self._border_filename(ext, folder)
         if self.isometric_var.get():
             # Overrides whichever codes the isometric edge-naming convention
             # can represent (edge-*/inner-*/pure tiles); corner-*, diag-*,
@@ -550,7 +561,7 @@ class TileGeneratorApp(tk.Tk):
         b_ext = os.path.splitext(self.picker_b.path or "")[1] or ".png"
         ext = {"Same as source": b_ext, "PNG": ".png", "BMP": ".bmp"}.get(fmt, b_ext)
 
-        names = self._current_filenames(ext)
+        names = self._current_filenames(ext, folder)
         saved = 0
         errors = []
         for code, filename in names.items():

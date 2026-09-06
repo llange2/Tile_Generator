@@ -478,6 +478,28 @@ def strip_leading_index(stem: str) -> str:
     return _LEADING_INDEX_RE.sub("", stem) or stem
 
 
+def next_border_filename(a_stem: str, ext: str, existing_names) -> str:
+    """Picks '<a_stem>_full_<n><ext>' using the lowest n not already taken by
+    a file in `existing_names` (e.g. an os.listdir() of the output folder),
+    so exporting a border tile for a different overlay never overwrites one
+    already on disk from a previous export."""
+    prefix = f"{a_stem}_full_"
+    ext_lower = ext.lower()
+    used = set()
+    for name in existing_names:
+        if not name.lower().endswith(ext_lower):
+            continue
+        stem = name[: len(name) - len(ext)] if ext else name
+        if stem.startswith(prefix):
+            suffix = stem[len(prefix):]
+            if suffix.isdigit():
+                used.add(int(suffix))
+    n = 1
+    while n in used:
+        n += 1
+    return f"{prefix}{n}{ext}"
+
+
 def sequential_filenames(start_index: int, overlay_stem: str, ext: str) -> dict:
     overlay_stem = strip_leading_index(overlay_stem)
     names = {}
@@ -567,6 +589,11 @@ def edge_signature(code: str, base_stem: str, secondary_stem: str):
         return {e: base_stem for e in EDGE_ORDER}
     if code == "_pure_b":
         return {e: secondary_stem for e in EDGE_ORDER}
+    if code == "border":
+        # The seamless-border tile's A frame touches all four edges (see
+        # build_border_mask), so it tiles like a pure-A tile from the
+        # outside even though its center carries the B overlay.
+        return {e: base_stem for e in EDGE_ORDER}
     edges = EDGE_ATTR_MAP.get(code)
     if edges is None:
         return None
