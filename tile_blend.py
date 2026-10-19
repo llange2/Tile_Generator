@@ -16,7 +16,7 @@ import zlib
 from dataclasses import dataclass
 
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image
 from scipy import ndimage
 from scipy.ndimage import distance_transform_edt
 
@@ -97,10 +97,18 @@ def derive_seed(seed: int, code: str) -> int:
 
 def _value_noise(size: int, seed: int, blur_radius: float) -> np.ndarray:
     rng = np.random.default_rng(seed)
-    arr = rng.random((size, size)).astype(np.float32)
-    img = Image.fromarray((arr * 255).astype(np.uint8), mode="L")
-    img = img.filter(ImageFilter.GaussianBlur(radius=max(0.5, blur_radius)))
-    a = np.asarray(img, dtype=np.float32) / 255.0
+    # Work in float on a downscaled grid (the field is low-frequency anyway,
+    # and a full-resolution sigma of ~100px would be slow): an 8-bit round
+    # trip leaves only a handful of gray levels after the blur, which shows
+    # up as terraced steps in the mask.
+    sigma = max(0.5, blur_radius)
+    factor = max(1, int(sigma / 4))
+    small = max(2, int(round(size / factor)))
+    arr = rng.random((small, small)).astype(np.float32)
+    a = ndimage.gaussian_filter(arr, sigma=sigma * small / size, mode="nearest")
+    if small != size:
+        a = ndimage.zoom(a, size / small, order=3, mode="nearest")
+        a = a[:size, :size]
     a = a - a.mean()
     max_abs = float(np.max(np.abs(a))) + 1e-6
     return a / max_abs
@@ -184,22 +192,24 @@ def build_corner_mask(size: int, tl: int, tr: int, bl: int, br: int,
     total_w = edge_w * proximity_w
     perturbed = np.clip(g + noise_strength * n * total_w, 0.0, 1.0)
 
-    # The actual antialiased edge comes straight from the continuous field,
-    # so it can be feathered arbitrarily finely (including sub-pixel widths)
-    # -- rebuilding it from a thresholded binary via a distance transform
-    # would quantize it to whole pixels and make any feather <= ~2px a no-op.
-    soft_mask = _smoothstep_mask(perturbed, 0.5, feather_width)
+    # The actual antialiased edge comes straight from the continuous field
+    # (smoothstep at the end), so it can be feathered arbitrarily finely
+    # (including sub-pixel widths) -- rebuilding it from a thresholded binary
+    # via a distance transform would quantize it to whole pixels and make any
+    # feather <= ~2px a no-op.
 
     # Belt-and-braces: remove any remaining disconnected fleck by keeping
-    # only the single largest region on each side, then hard-patch just the
-    # (typically handful of) pixels that reassignment actually touched --
-    # everywhere else keeps its finely feathered value from above.
+    # only the single largest region on each side. The field is exactly 0.5
+    # along a fleck's outline, so mirroring it about 0.5 inside the fleck
+    # moves it to the other side while staying continuous. Hard-setting those
+    # pixels to 0/1 instead leaves a visible cliff against the surrounding
+    # (~0.5) pixels whenever the feather is wide.
     raw_binary = perturbed >= 0.5
     cleaned_binary = _clean_disconnected_specks(raw_binary, expected_components)
     flipped = cleaned_binary != raw_binary
     if np.any(flipped):
-        soft_mask = np.where(flipped, cleaned_binary.astype(soft_mask.dtype), soft_mask)
-    return soft_mask
+        perturbed = np.where(flipped, 1.0 - perturbed, perturbed)
+    return _smoothstep_mask(perturbed, 0.5, feather_width)
 
 
 def build_blob_mask(size: int, invert: bool, radius_frac: float, feather_frac: float,
